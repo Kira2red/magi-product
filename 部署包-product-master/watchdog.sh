@@ -74,7 +74,93 @@ except:
     fi
 }
 
-# 检测卡死：方法1 看最后消息时间差，方法2 看 gateway log 的 stalled 警告
+# 方法3：检测子 Agent 已返回但 Controller 未处理（最常见卡死模式）
+UNREAD_RESULT_THRESHOLD=120  # 2分钟未处理 → 唤醒
+detect_unread_subagent_result() {
+    local sf="$1"
+    local now="$2"
+
+    if [[ ! -f "$sf" ]]; then
+        echo "ok"
+        return
+    fi
+
+    python3 -c "
+import json, sys
+
+sf = '$sf'
+now = $now
+threshold = $UNREAD_RESULT_THRESHOLD
+
+try:
+    with open(sf) as f:
+        lines = [line.strip() for line in f if line.strip()]
+except:
+    sys.exit(0)
+
+# 分别找到最后 toolResult 和最后 assistant text 的时间戳
+last_tool_result_ts = None
+last_assistant_text_ts = None
+last_tool_result_msg = ''
+
+for line in lines:
+    try:
+        ev = json.loads(line)
+    except:
+        continue
+    msg = ev.get('message', {})
+    role = msg.get('role', '')
+    content = msg.get('content', [])
+    ts_str = ev.get('timestamp', '')
+
+    # 检查 toolResult
+    if role == 'toolResult':
+        for item in content if isinstance(content, list) else []:
+            if isinstance(item, dict):
+                text = item.get('text', '') or item.get('content', '') or item.get('result', '')
+                if isinstance(text, str) and len(text) > 50:
+                    last_tool_result_ts = ts_str
+                    last_tool_result_msg = text[:80]
+                    break
+
+    # 检查 assistant text
+    if role == 'assistant':
+        for item in content if isinstance(content, list) else []:
+            if isinstance(item, dict) and item.get('type') == 'text':
+                t = item.get('text', '')
+                if len(t) > 20:
+                    last_assistant_text_ts = ts_str
+                    break
+
+# 如果都没有记录，跳过
+if not last_tool_result_ts or not last_assistant_text_ts:
+    print('ok')
+    sys.exit(0)
+
+# 比较时间戳大小（字符串比较在 ISO 格式下是对的）
+if last_tool_result_ts <= last_assistant_text_ts:
+    # toolResult 在 assistant text 之前 → 正常，已经处理了
+    print('ok')
+    sys.exit(0)
+
+# toolResult 在 assistant text 之后 → Controller 还没处理
+# 计算 toolResult 到现在的时间差
+try:
+    from datetime import datetime, timezone
+    ts_dt = datetime.fromisoformat(last_tool_result_ts[:19])
+    ts_epoch = int(ts_dt.timestamp())
+    gap = now - ts_epoch
+except:
+    gap = 0
+
+if gap >= threshold:
+    print('missed_result')
+else:
+    print('ok')
+" 2>/dev/null || echo "ok"
+}
+
+# 检测卡死：方法1 看最后消息时间差，方法2 看 gateway log，方法3 子 Agent 返回但 Controller 未处理
 detect_stall() {
     local now
     now=$(date +%s)
@@ -117,6 +203,16 @@ detect_stall() {
         fi
     fi
 
+    # 方法3：子 Agent 返回了但 Controller 没读
+    if [[ -n "${sf:-}" ]]; then
+        local result_status
+        result_status=$(detect_unread_subagent_result "$sf" "$now")
+        if [[ "$result_status" != "ok" ]]; then
+            echo "$result_status"
+            return
+        fi
+    fi
+
     echo "ok"
 }
 
@@ -141,6 +237,13 @@ while true; do
             if (( now - LAST_ACTION > COOLDOWN )); then
                 log "⏱ ${POKE_THRESHOLD}s 无响应，发送唤醒"
                 send_message "到哪了"
+                LAST_ACTION=$now
+            fi
+            ;;
+        missed_result)
+            if (( now - LAST_ACTION > COOLDOWN )); then
+                log "🔔 子 Agent 已返回但 Controller 超过 ${UNREAD_RESULT_THRESHOLD}s 未处理，发送强制检查"
+                send_message "检查下之前派发的子 Agent 有没有返回，应该是回来了但你没发现。读取最新的 toolResult，合并双 Agent 结果展示给我"
                 LAST_ACTION=$now
             fi
             ;;
