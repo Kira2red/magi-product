@@ -31,10 +31,25 @@ send_message() {
 
 # 检测是否有活跃的 product-master 会话
 find_active_session() {
-    # 找最近10分钟内修改过的 jsonl 文件（排除 .trajectory.jsonl）
+    # 优先找包含产品大师 activity 的最近会话
+    local pm_sessions
+    pm_sessions=$(find "$SESSIONS_DIR" -maxdepth 1 -name "*.jsonl" \
+        ! -name "*.trajectory.jsonl" \
+        -mmin -30 2>/dev/null | while read f; do
+        if grep -ql "产品大师\|product-master\|场景锚点\|lead_pm\|reviewer" "$f" 2>/dev/null; then
+            echo "$f"
+        fi
+    done | sort | head -1)
+
+    if [[ -n "$pm_sessions" ]]; then
+        echo "$pm_sessions"
+        return
+    fi
+
+    # fallback: 找最近修改的文件
     find "$SESSIONS_DIR" -maxdepth 1 -name "*.jsonl" \
         ! -name "*.trajectory.jsonl" \
-        -mmin -30 2>/dev/null | head -1
+        -mmin -30 2>/dev/null | sort | head -1
 }
 
 # 获取会话最后一条消息的时间戳（秒）
