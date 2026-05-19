@@ -160,6 +160,73 @@ else:
 " 2>/dev/null || echo "ok"
 }
 
+# 方法4：状态 checkpoint 差检测（🔖 标签未推进）
+CHECKPOINT_STALL_THRESHOLD=180  # 3分钟状态未推进 → 警告
+detect_checkpoint_stall() {
+    local sf="$1"
+    local now="$2"
+
+    if [[ ! -f "$sf" ]]; then
+        echo "ok"
+        return
+    fi
+
+    python3 -c "
+import json, sys, re
+
+sf = '$sf'
+now = $now
+threshold = $CHECKPOINT_STALL_THRESHOLD
+
+try:
+    with open(sf) as f:
+        lines = [line.strip() for line in f if line.strip()]
+except:
+    sys.exit(0)
+
+# 找所有 assistant 文本中的 🔖 标签
+checkpoints = []  # (ts, tag)
+for line in lines:
+    try:
+        ev = json.loads(line)
+    except:
+        continue
+    msg = ev.get('message', {})
+    if msg.get('role') != 'assistant':
+        continue
+    content = msg.get('content', [])
+    for item in content if isinstance(content, list) else []:
+        if isinstance(item, dict) and item.get('type') == 'text':
+            t = item.get('text', '')
+            tags = re.findall(r'🔖\[.*?\]', t)
+            if tags:
+                checkpoints.append((ev.get('timestamp', ''), tags[-1]))
+
+if not checkpoints:
+    print('ok')
+    sys.exit(0)
+
+last_tag = checkpoints[-1][1]
+last_ts = checkpoints[-1][0]
+
+# 计算最后一个 checkpoint 到现在的时间差
+try:
+    from datetime import datetime
+    ts_dt = datetime.fromisoformat(last_ts[:19])
+    ts_epoch = int(ts_dt.timestamp())
+    gap = now - ts_epoch
+except:
+    gap = 0
+
+# 只在「等待」类状态时检测
+waiting_states = ['等待LeadPM', '等待Reviewer', '等待', '派发LeadPM', '派发Reviewer']
+if any(w in last_tag for w in waiting_states) and gap >= threshold:
+    print(f'checkpoint_stall:{last_tag}')
+else:
+    print('ok')
+" 2>/dev/null || echo "ok"
+}
+
 # 检测卡死：方法1 看最后消息时间差，方法2 看 gateway log，方法3 子 Agent 返回但 Controller 未处理
 detect_stall() {
     local now
@@ -213,6 +280,16 @@ detect_stall() {
         fi
     fi
 
+    # 方法4：状态 checkpoint 卡在等待态
+    if [[ -n "${sf:-}" ]]; then
+        local cp_status
+        cp_status=$(detect_checkpoint_stall "$sf" "$now")
+        if [[ "$cp_status" != "ok" ]]; then
+            echo "$cp_status"
+            return
+        fi
+    fi
+
     echo "ok"
 }
 
@@ -244,6 +321,14 @@ while true; do
             if (( now - LAST_ACTION > COOLDOWN )); then
                 log "🔔 子 Agent 已返回但 Controller 超过 ${UNREAD_RESULT_THRESHOLD}s 未处理，发送强制检查"
                 send_message "检查下之前派发的子 Agent 有没有返回，应该是回来了但你没发现。读取最新的 toolResult，合并双 Agent 结果展示给我"
+                LAST_ACTION=$now
+            fi
+            ;;
+        checkpoint_stall:*)
+            if (( now - LAST_ACTION > COOLDOWN )); then
+                local stuck_tag="${status#checkpoint_stall:}"
+                log "🔖 状态 ${stuck_tag} 已卡 ${CHECKPOINT_STALL_THRESHOLD}s，发送状态推进指令"
+                send_message "你的状态标签停在 ${stuck_tag}，超过3分钟了。检查下子 Agent 有没有返回、有没有合并展示，推进到下一步。"
                 LAST_ACTION=$now
             fi
             ;;
