@@ -334,16 +334,26 @@ while true; do
             ;;
         missed_result)
             if (( now - LAST_ACTION > COOLDOWN )); then
-                log "🔔 子 Agent 已返回但 Controller 超过 ${UNREAD_RESULT_THRESHOLD}s 未处理，发送强制检查"
-                send_message "检查下之前派发的子 Agent 有没有返回，应该是回来了但你没发现。读取最新的 toolResult，合并双 Agent 结果展示给我"
+                log "🔔 子 Agent 已返回但 Controller 超过 ${UNREAD_RESULT_THRESHOLD}s 未处理，硬重启"
+                send_message "你已经漏掉了子 Agent 的返回结果。现在立刻：1.停止当前等待 2.找到最新的 toolResult 或 subagent 返回消息 3.读取它的内容 4.合并双 Agent 结果展示给我。不要解释，直接执行。"
                 LAST_ACTION=$now
             fi
             ;;
         checkpoint_stall:*)
             if (( now - LAST_ACTION > COOLDOWN )); then
                 local stuck_tag="${status#checkpoint_stall:}"
-                log "🔖 状态 ${stuck_tag} 已卡 ${CHECKPOINT_STALL_THRESHOLD}s，发送状态推进指令"
-                send_message "你的状态标签停在 ${stuck_tag}，超过3分钟了。检查下子 Agent 有没有返回、有没有合并展示，推进到下一步。"
+                log "🔖 状态 ${stuck_tag} 已卡 ${CHECKPOINT_STALL_THRESHOLD}s，硬重启"
+
+                # 根据卡住的状态生成精准的介入指令
+                local action_msg
+                if echo "$stuck_tag" | grep -q "等待LeadPM\|派发LeadPM"; then
+                    action_msg="你停在等待 Lead PM 的状态。Lead PM 可能已经返回但你没发现。立刻：1.取消等待 2.找 Lead PM 的返回结果（toolResult 或文件路径）3.如果 Lead PM 已回，合并展示；如果超时10分钟，标记为超时、跳过 Lead PM 进入下一步"
+                elif echo "$stuck_tag" | grep -q "等待Reviewer\|派发Reviewer"; then
+                    action_msg="你停在等待 Reviewer 的状态。Reviewer 可能已经返回但你没发现。立刻：1.取消等待 2.找 Reviewer 的返回结果 3.如果已回，合并展示；如果超时，自己代替 Reviewer 做审查然后合并展示"
+                else
+                    action_msg="你的状态停在 ${stuck_tag} 超过3分钟了。检查子 Agent 有没有返回、有没有合并展示，如果卡死了就跳过当前步骤进入下一步，把已有产出展示给我。"
+                fi
+                send_message "$action_msg"
                 LAST_ACTION=$now
             fi
             ;;
