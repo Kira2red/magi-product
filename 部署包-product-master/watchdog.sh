@@ -295,6 +295,94 @@ else:
 " 2>/dev/null || echo "ok"
 }
 
+# 方法5：双 Agent 都返回了但 Controller 没合并（最常见卡死模式之二）
+DUAL_RETURN_THRESHOLD=120  # 2分钟未合并 → 强制
+detect_dual_return_no_merge() {
+    local sf="$1"
+    local now="$2"
+
+    if [[ ! -f "$sf" ]]; then
+        echo "ok"
+        return
+    fi
+
+    python3 -c "
+import json, sys, re
+
+sf = '$sf'
+now = $now
+threshold = $DUAL_RETURN_THRESHOLD
+
+try:
+    with open(sf) as f:
+        lines = [line.strip() for line in f if line.strip()]
+except:
+    sys.exit(0)
+
+# 找所有 checkpoint 标签
+checkpoints = []
+for line in lines:
+    try:
+        ev = json.loads(line)
+    except:
+        continue
+    msg = ev.get('message', {})
+    if msg.get('role') != 'assistant':
+        continue
+    content = msg.get('content', [])
+    for item in content if isinstance(content, list) else []:
+        if isinstance(item, dict) and item.get('type') == 'text':
+            t = item.get('text', '')
+            tags = re.findall(r'🔖\[.*?\]', t)
+            if tags:
+                checkpoints.append((ev.get('timestamp', ''), tags[-1]))
+
+if not checkpoints:
+    print('ok')
+    sys.exit(0)
+
+# 找「Lead PM 已返回」和「Reviewer 已返回」的时间点
+lp_return_ts = None
+rv_return_ts = None
+merge_after_returns = False
+last_is_merge = ('合并展示' in checkpoints[-1][1])
+
+for ts, tag in checkpoints:
+    if 'LeadPM已返回' in tag or 'PM已返回' in tag or 'LeadPM完成' in tag:
+        lp_return_ts = ts
+    if 'Reviewer已返回' in tag or 'Reviewer完成' in tag:
+        rv_return_ts = ts
+    # 检查合并是否发生在两者都返回之后
+    if lp_return_ts and rv_return_ts and '合并展示' in tag:
+        merge_after_returns = True
+
+# 双 Agent 都返回了吗？
+if not lp_return_ts or not rv_return_ts:
+    print('ok')
+    sys.exit(0)
+
+# 已经合并了？
+if merge_after_returns or last_is_merge:
+    print('ok')
+    sys.exit(0)
+
+# 计算两者都返回以来的时间（取较晚的那个）
+try:
+    from datetime import datetime
+    later_ts = max(lp_return_ts, rv_return_ts)
+    ts_dt = datetime.fromisoformat(later_ts[:19])
+    ts_epoch = int(ts_dt.timestamp())
+    gap = now - ts_epoch
+except:
+    gap = 0
+
+if gap >= threshold:
+    print(f'dual_return_no_merge:{gap}')
+else:
+    print('ok')
+" 2>/dev/null || echo "ok"
+}
+
 # 检测卡死：方法1 看最后消息时间差，方法2 看 gateway log，方法3 子 Agent 返回但 Controller 未处理
 detect_stall() {
     local now
@@ -358,6 +446,16 @@ detect_stall() {
         fi
     fi
 
+    # 方法5：双 Agent 都返回了但 Controller 没合并
+    if [[ -n "${sf:-}" ]]; then
+        local dr_status
+        dr_status=$(detect_dual_return_no_merge "$sf" "$now")
+        if [[ "$dr_status" != "ok" ]]; then
+            echo "$dr_status"
+            return
+        fi
+    fi
+
     echo "ok"
 }
 
@@ -407,6 +505,14 @@ while true; do
                     action_msg="你的状态停在 ${stuck_tag} 超过3分钟了。检查子 Agent 有没有返回、有没有合并展示，如果卡死了就跳过当前步骤进入下一步，把已有产出展示给我。"
                 fi
                 send_message "$action_msg"
+                LAST_ACTION=$now
+            fi
+            ;;
+        dual_return_no_merge:*)
+            if (( now - LAST_ACTION > COOLDOWN )); then
+                local gap_secs="${status#dual_return_no_merge:}"
+                log "🔔 双 Agent 已返回 ${gap_secs}s 但未合并，注入强制合并指令"
+                send_message "你的 checkpoint 标签显示 Lead PM 和 Reviewer 都已经返回了，但你没有合并展示。立刻：1.停止等待 2.读取两者的返回内容 3.合并后展示给我。不要再等了。"
                 LAST_ACTION=$now
             fi
             ;;
