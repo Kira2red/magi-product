@@ -97,8 +97,32 @@ risk: safe
 ## 格式验证命令（阶段三专用）
 
 ```bash
+# 检查1: 禁止 ASCII 框图
 grep -n '[┌└│├┬┴─]' <PRD文件> && echo "❌ ASCII框图"
-grep -in 'CAN\|LIN\|SoC路由\|500kbps\|电机响应' <PRD文件> && echo "❌ 技术细节"
+
+# 检查2: 禁止硬件层技术细节
+grep -in 'CAN\|LIN\|SoC路由\|500kbps\|电机响应' <PRD文件> && echo "❌ 硬件技术细节"
+
+# 检查3: Web/API 层技术细节（三档分层判断）
+python3 -c "
+import re
+with open('<PRD文件>') as f:
+    text = f.read()
+
+# 🔴 硬拦截：HTTP方法+路径 或 字段+类型 同时出现
+if re.search(r'(GET|POST|PUT|DELETE|PATCH)\s+/api/', text):
+    print('❌ 硬拦截: HTTP方法+API路径同时出现，这是技术方案细节。改为产品语言描述。')
+if re.search(r'varchar\(\d+\)|int\(\d+\)|INTEGER|BOOLEAN|TIMESTAMP', text):
+    print('❌ 硬拦截: 数据库字段类型出现。去掉类型声明，只保留字段含义。')
+
+# 🟡 软提醒：单独出现技术名词但无上下文
+for kw in ['messageType', 'message_type', 'MQTT topic', 'grpc', 'protobuf', 't_[a-z_]+']:
+    matches = re.findall(kw, text)
+    if matches and not re.search(r'(GET|POST|PUT|DELETE)\s+/api/', text):
+        print(f'🟡 软提醒: 出现技术名词\"{matches[0]}\"，确认是否为必要的产品描述。')
+
+print('✅ Web/API 层检查完成')
+"
 ```
 
 不通过 → 打回 Lead PM。通过 → 终审。
