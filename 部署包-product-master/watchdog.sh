@@ -29,27 +29,80 @@ send_message() {
         -d "{\"message\":\"$msg\"}" 2>/dev/null || true
 }
 
-# 检测是否有活跃的 product-master 会话
-find_active_session() {
-    # 优先找包含产品大师 activity 的最近会话
-    local pm_sessions
-    pm_sessions=$(find "$SESSIONS_DIR" -maxdepth 1 -name "*.jsonl" \
-        ! -name "*.trajectory.jsonl" \
-        -mmin -30 2>/dev/null | while read f; do
-        if grep -ql "产品大师\|product-master\|场景锚点\|lead_pm\|reviewer" "$f" 2>/dev/null; then
-            echo "$f"
-        fi
-    done | sort | head -1)
+# 检测是否有活跃的 product-master 会话（硬逻辑，不走 grep 猜测）
+find_controller_session() {
+    python3 -c "
+import os, json, glob, re
 
-    if [[ -n "$pm_sessions" ]]; then
-        echo "$pm_sessions"
+sessions_dir = os.path.expanduser('$SESSIONS_DIR')
+candidates = []
+
+for sf in glob.glob(f'{sessions_dir}/*.jsonl'):
+    if 'trajectory' in sf:
+        continue
+    try:
+        mtime = os.path.getmtime(sf)
+        size = os.path.getsize(sf)
+    except:
+        continue
+
+    # 跳过太小的文件（< 5KB，通常是刚创建的空 session）
+    if size < 5000:
+        continue
+
+    # 跳过子 Agent 会话（第一个 user 消息包含 [Subagent Context]）
+    try:
+        with open(sf) as f:
+            head = f.read(8192)
+    except:
+        continue
+
+    is_subagent = '[Subagent Context]' in head
+    if is_subagent:
+        continue
+
+    # 评分：session 越匹配产品大师，分数越高
+    score = 0
+    if '产品大师' in head or 'product-master' in head:
+        score += 10
+    if '🔖[' in head:
+        score += 20
+    if 'sessions_spawn' in head:
+        score += 15
+    if '启用产品大师' in head or '启动产品大师' in head:
+        score += 30
+    if '阶段' in head:
+        score += 5
+
+    candidates.append((sf, mtime, score))
+
+# 按分数降序 + 时间降序排序
+candidates.sort(key=lambda x: (x[2], x[1]), reverse=True)
+
+if candidates:
+    print(candidates[0][0])
+else:
+    print('')
+" 2>/dev/null
+}
+
+find_active_session() {
+    local pm_session
+    pm_session=$(find_controller_session)
+    if [[ -n "$pm_session" ]]; then
+        echo "$pm_session"
         return
     fi
 
-    # fallback: 找最近修改的文件
+    # 最终 fallback：找最近修改的非 subagent session
     find "$SESSIONS_DIR" -maxdepth 1 -name "*.jsonl" \
         ! -name "*.trajectory.jsonl" \
-        -mmin -30 2>/dev/null | sort | head -1
+        -mmin -60 2>/dev/null | while read f; do
+        if ! grep -q '\[Subagent Context\]' "$f" 2>/dev/null; then
+            echo "$f"
+            break
+        fi
+    done
 }
 
 # 获取会话最后一条消息的时间戳（秒）
