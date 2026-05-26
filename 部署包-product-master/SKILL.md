@@ -16,6 +16,12 @@ risk: safe
 
 **每个动作前后必须输出状态标签。不靠记忆，靠标签。**
 
+**🔴 启动后第一件事：注册 session。** 在你输出第一个文字之前，执行：
+
+```bash
+echo "${OPENCLAW_SESSION_ID:-$(ls -t ~/.openclaw/agents/main/sessions/*.jsonl | head -1 | xargs basename | sed 's/.jsonl//')}" > /tmp/pm-active-session
+```
+
 ```
 派发前: 🔖[阶段一/1.3/派发LeadPM]
 等待中: 🔖[阶段一/1.3/等待Reviewer]

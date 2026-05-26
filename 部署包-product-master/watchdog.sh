@@ -6,6 +6,7 @@ set -eu
 
 LOG_FILE="/tmp/openclaw/openclaw-$(date +%Y-%m-%d).log"
 SESSIONS_DIR="${HOME}/.openclaw/agents/main/sessions"
+MARKER_FILE="/tmp/pm-active-session"
 POKE_THRESHOLD=300      # 5分钟无新消息 → 发 poke
 CONVERGE_THRESHOLD=600   # 10分钟无新消息 → 发收敛
 COOLDOWN=120             # 两次干预之间至少间隔2分钟
@@ -87,6 +88,18 @@ else:
 }
 
 find_active_session() {
+    # 🔴 优先：读取 Controller 启动时注册的精确 session ID
+    if [[ -f "$MARKER_FILE" ]]; then
+        local registered_id
+        registered_id=$(cat "$MARKER_FILE" 2>/dev/null | tr -d '\n\r ')
+        local registered_path="${SESSIONS_DIR}/${registered_id}.jsonl"
+        if [[ -n "$registered_id" && -f "$registered_path" ]]; then
+            echo "$registered_path"
+            return 0
+        fi
+    fi
+
+    # Fallback：通过启发式方法找 product-master session
     local pm_session
     pm_session=$(find_controller_session)
     if [[ -n "$pm_session" ]]; then
