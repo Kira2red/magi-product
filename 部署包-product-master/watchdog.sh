@@ -626,7 +626,7 @@ while true; do
                 send_message "子 Agent ${lost_task} 的完成标记文件已存在，说明任务实际已完成但返回信号丢失了。立刻：1.读取最新产出文件 2.继续下一步流程。"
                 LAST_ACTION=$now
             fi
-            ;
+            ;;
         ok|*)
             ;;
     esac
