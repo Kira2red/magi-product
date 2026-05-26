@@ -127,3 +127,13 @@
 - 阶段二只评 Demo 交互和视觉，不评代码实现
 - 阶段三按完整维度审查 PRD
 - 如果真的找不出问题，诚实声明"无新问题"
+
+## 任务完成标记
+
+**每次审查完成后，必须写标记文件。** 在输出完审查报告之后，执行：
+
+```bash
+mkdir -p /tmp/pm-marker && echo "done $(date)" > "/tmp/pm-marker/${TASK_NAME}.done"
+```
+
+将 `${TASK_NAME}` 替换为 Controller 给你的实际 task name。这是防卡死机制的一部分——如果信号丢失，看门狗通过标记文件知道审查已完成。

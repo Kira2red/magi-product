@@ -383,6 +383,86 @@ else:
 " 2>/dev/null || echo "ok"
 }
 
+
+# 方法6：任务完成标记检测（子 Agent 写了 marker 但 Controller 没继续）
+MARKER_STALL_THRESHOLD=90
+detect_marker_but_no_progress() {
+    local sf="$1"
+    local now="$2"
+
+    if [[ ! -d /tmp/pm-marker ]]; then
+        echo "ok"
+        return
+    fi
+
+    if [[ ! -f "$sf" ]]; then
+        echo "ok"
+        return
+    fi
+
+    python3 -c "
+import json, sys, os, re, glob
+
+sf = '$sf'
+now = $now
+threshold = $MARKER_STALL_THRESHOLD
+marker_dir = '/tmp/pm-marker'
+
+try:
+    with open(sf) as f:
+        lines = [line.strip() for line in f if line.strip()]
+except:
+    sys.exit(0)
+
+spawn_tasks = set()
+completed_spawns = set()
+
+for line in lines:
+    try:
+        ev = json.loads(line)
+    except:
+        continue
+    msg = ev.get('message', {})
+    content = msg.get('content', [])
+
+    for item in content if isinstance(content, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if item.get('type') == 'toolCall' and item.get('name') == 'sessions_spawn':
+            tn = item.get('arguments', {}).get('taskName', '')
+            if tn:
+                spawn_tasks.add(tn)
+    if msg.get('role') == 'toolResult':
+        for item in content if isinstance(content, list) else []:
+            if isinstance(item, dict):
+                text = str(item.get('text', '') or item.get('content', '') or item.get('result', ''))
+                for tn in list(spawn_tasks):
+                    if tn in text:
+                        completed_spawns.add(tn)
+
+pending_markers = []
+for tn in spawn_tasks:
+    if tn in completed_spawns:
+        continue
+    marker_path = os.path.join(marker_dir, f'{tn}.done')
+    if os.path.exists(marker_path):
+        mtime = os.path.getmtime(marker_path)
+        marker_age = now - mtime
+        pending_markers.append((tn, marker_age))
+
+if not pending_markers:
+    print('ok')
+    sys.exit(0)
+
+for tn, age in pending_markers:
+    if age >= threshold:
+        print(f'marker_lost:{tn}')
+        sys.exit(0)
+
+print('ok')
+" 2>/dev/null || echo "ok"
+}
+
 # 检测卡死：方法1 看最后消息时间差，方法2 看 gateway log，方法3 子 Agent 返回但 Controller 未处理
 detect_stall() {
     local now
@@ -456,6 +536,16 @@ detect_stall() {
         fi
     fi
 
+    # 方法6：子 Agent 写了 marker 文件但 Controller 未继续（信号丢失卡死）
+    if [[ -n "${sf:-}" ]]; then
+        local marker_status
+        marker_status=$(detect_marker_but_no_progress "$sf" "$now")
+        if [[ "$marker_status" != "ok" ]]; then
+            echo "$marker_status"
+            return
+        fi
+    fi
+
     echo "ok"
 }
 
@@ -516,6 +606,14 @@ while true; do
                 LAST_ACTION=$now
             fi
             ;;
+        marker_lost:*)
+            if (( now - LAST_ACTION > COOLDOWN )); then
+                local lost_task="${status#marker_lost:}"
+                log "📌 子 Agent ${lost_task} 已写完成标记但信号丢失，注入推进指令"
+                send_message "子 Agent ${lost_task} 的完成标记文件已存在，说明任务实际已完成但返回信号丢失了。立刻：1.读取最新产出文件 2.继续下一步流程。"
+                LAST_ACTION=$now
+            fi
+            ;
         ok|*)
             ;;
     esac
